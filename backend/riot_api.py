@@ -1,9 +1,12 @@
+
 import os
+import time
 from pathlib import Path
 from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
 
 
 # ============================================================
@@ -59,6 +62,23 @@ def get_regional_route(platform: str) -> str:
 
 
 # ============================================================
+# REUSABLE HTTP CONNECTION
+# ============================================================
+
+session = requests.Session()
+session.headers.update(HEADERS)
+
+# Connection pooling, without hidden automatic retries.
+adapter = HTTPAdapter(
+    pool_connections=10,
+    pool_maxsize=10,
+    max_retries=0,
+)
+
+session.mount("https://", adapter)
+
+
+# ============================================================
 # HANDLE RIOT API ERRORS
 # ============================================================
 
@@ -68,9 +88,14 @@ def check_response(response):
             "The requested Riot resource was not found."
         )
 
+    if response.status_code == 401:
+        raise ValueError(
+            "Riot API authentication failed."
+        )
+
     if response.status_code == 403:
         raise ValueError(
-            "Riot API key is invalid or expired."
+            "Riot API key is invalid, expired, or lacks access."
         )
 
     if response.status_code == 429:
@@ -79,6 +104,62 @@ def check_response(response):
         )
 
     response.raise_for_status()
+
+
+# ============================================================
+# RIOT API REQUEST WITH RETRIES
+# ============================================================
+
+def riot_get(url, params=None):
+    max_attempts = 3
+
+    for attempt in range(max_attempts):
+        try:
+            response = session.get(
+                url,
+                params=params,
+                timeout=(5, 10),
+            )
+
+            # Retry temporary server errors.
+            if response.status_code in (500, 502, 503, 504):
+                if attempt < max_attempts - 1:
+                    print(
+                        f"Riot server error {response.status_code}. "
+                        f"Retrying ({attempt + 1}/{max_attempts - 1})..."
+                    )
+
+                    time.sleep(attempt + 1)
+                    continue
+
+            check_response(response)
+
+            return response.json()
+
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as error:
+
+            if attempt == max_attempts - 1:
+                raise ValueError(
+                    "Could not connect to Riot Games API "
+                    "after multiple attempts. "
+                    "Please try again later."
+                ) from error
+
+            print(
+                f"Riot API connection failed: "
+                f"{type(error).__name__}. "
+                f"Retrying ({attempt + 1}/{max_attempts - 1})..."
+            )
+
+            time.sleep(attempt + 1)
+
+    raise ValueError(
+        "Riot API request failed after multiple attempts."
+    )
 
 
 # ============================================================
@@ -108,20 +189,13 @@ def get_account_by_riot_id(
         f"{encoded_game_name}/{encoded_tag_line}"
     )
 
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=15,
-    )
+    try:
+        return riot_get(url)
 
-    if response.status_code == 404:
-        raise ValueError(
-            "Riot ID was not found."
-        )
-
-    check_response(response)
-
-    return response.json()
+    except ValueError as error:
+        if str(error) == "The requested Riot resource was not found.":
+            raise ValueError("Riot ID was not found.") from error
+        raise
 
 
 # ============================================================
@@ -156,16 +230,10 @@ def get_recent_match_ids(
     if queue is not None:
         params["queue"] = queue
 
-    response = requests.get(
+    return riot_get(
         url,
-        headers=HEADERS,
         params=params,
-        timeout=15,
     )
-
-    check_response(response)
-
-    return response.json()
 
 
 # ============================================================
@@ -188,17 +256,10 @@ def get_match(
         f"/lol/match/v5/matches/{encoded_match_id}"
     )
 
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=15,
-    )
+    try:
+        return riot_get(url)
 
-    if response.status_code == 404:
-        raise ValueError(
-            "Match was not found."
-        )
-
-    check_response(response)
-
-    return response.json()
+    except ValueError as error:
+        if str(error) == "The requested Riot resource was not found.":
+            raise ValueError("Match was not found.") from error
+        raise

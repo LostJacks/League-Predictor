@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,6 +15,7 @@ from predictor import (
 from riot_service import (
     get_recent_ranked_matches,
     predict_selected_match,
+    predict_overall_rank,
 )
 
 from schemas import (
@@ -30,10 +32,12 @@ from schemas import (
 
 app = FastAPI(
     title="RankScope API",
-    version="1.0.0",
+    version="1.2.0",
     description=(
-        "REST API for predicting which League of Legends rank "
-        "a single match performance most closely resembles."
+        "RankScope predicts League of Legends performance "
+        "ranks using CatBoost models. It supports individual "
+        "match predictions and overall predictions based on "
+        "up to 20 recent Ranked Solo/Duo matches."
     ),
 )
 
@@ -60,9 +64,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {
-        "status": "ok"
-    }
+    return {"status": "ok"}
 
 
 # ============================================================
@@ -86,9 +88,7 @@ def model_info():
 
 @app.get("/api/ranks")
 def get_ranks():
-    return {
-        "ranks": RANK_ORDER
-    }
+    return {"ranks": RANK_ORDER}
 
 
 # ============================================================
@@ -97,31 +97,27 @@ def get_ranks():
 
 @app.get("/api/roles")
 def get_roles():
-    return {
-        "roles": ROLES
-    }
+    return {"roles": ROLES}
 
 
 # ============================================================
 # RECENT RANKED MATCHES
 #
-# Riot ID -> latest 5 Ranked Solo matches
-# Used by the React match-selection screen
+# Existing endpoint:
+# Browse the player's latest 5 ranked matches.
 # ============================================================
 
 @app.post("/api/matches/recent")
 def recent_ranked_matches(
-    request: RiotIdPredictionRequest
+    request: RiotIdPredictionRequest,
 ):
     try:
-        result = get_recent_ranked_matches(
+        return get_recent_ranked_matches(
             game_name=request.game_name,
             tag_line=request.tag_line,
             platform=request.platform,
             count=5,
         )
-
-        return result
 
     except ValueError as error:
         raise HTTPException(
@@ -133,8 +129,8 @@ def recent_ranked_matches(
 # ============================================================
 # PREDICT SELECTED MATCH
 #
-# User selects one of the returned matches,
-# then RankScope analyses that exact match.
+# Existing functionality:
+# Predict one specific match selected by the user.
 # ============================================================
 
 @app.post(
@@ -142,17 +138,48 @@ def recent_ranked_matches(
     status_code=status.HTTP_201_CREATED,
 )
 def create_riot_prediction(
-    request: SelectedMatchPredictionRequest
+    request: SelectedMatchPredictionRequest,
 ):
     try:
-        result = predict_selected_match(
+        return predict_selected_match(
             game_name=request.game_name,
             tag_line=request.tag_line,
             platform=request.platform,
             match_id=request.match_id,
         )
 
-        return result
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        )
+
+
+# ============================================================
+# OVERALL PREDICTION
+#
+# NEW WORKFLOW:
+#
+# 1. Search player using Riot ID.
+# 2. Retrieve up to 20 recent Ranked Solo matches.
+# 3. Predict each match using the CatBoost ensemble.
+# 4. Combine predictions using median voting.
+# 5. Return overall rank and individual match statistics.
+#
+# The processing is handled by riot_service.py.
+# ============================================================
+
+@app.post("/api/predictions/overall")
+def create_overall_prediction(
+    request: RiotIdPredictionRequest,
+):
+    try:
+        return predict_overall_rank(
+            game_name=request.game_name,
+            tag_line=request.tag_line,
+            platform=request.platform,
+            count=20,
+        )
 
     except ValueError as error:
         raise HTTPException(
@@ -164,7 +191,7 @@ def create_riot_prediction(
 # ============================================================
 # RAW PREDICTION
 #
-# Mainly used for testing directly with 10 participants.
+# Used for directly testing the model with 10 participants.
 # ============================================================
 
 @app.post(
@@ -173,7 +200,7 @@ def create_riot_prediction(
     status_code=status.HTTP_201_CREATED,
 )
 def create_raw_prediction(
-    request: PredictionRequest
+    request: PredictionRequest,
 ):
     try:
         participants = [
@@ -181,12 +208,10 @@ def create_raw_prediction(
             for participant in request.participants
         ]
 
-        result = predict_rank(
+        return predict_rank(
             raw_participants=participants,
             selected_player_id=request.selected_player_id,
         )
-
-        return result
 
     except ValueError as error:
         raise HTTPException(

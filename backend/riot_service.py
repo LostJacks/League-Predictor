@@ -4,7 +4,8 @@ from riot_api import (
     get_match,
 )
 
-from predictor import predict_rank
+from statistics import median
+from predictor import predict_rank, RANK_ORDER
 
 
 RANKED_SOLO_QUEUE = 420
@@ -496,3 +497,145 @@ def predict_from_riot_id(
         platform=platform,
         match_id=match_ids[0],
     )
+
+
+# ============================================================
+# OVERALL RANK PREDICTION - UP TO 20 MATCHES
+# ============================================================
+
+def predict_overall_rank(
+    game_name,
+    tag_line,
+    platform,
+    count=20,
+):
+    # Find account once
+    account = get_account_by_riot_id(
+        game_name,
+        tag_line,
+        platform,
+    )
+
+    puuid = account["puuid"]
+
+    # Get recent Ranked Solo match IDs
+    match_ids = get_recent_match_ids(
+        puuid,
+        platform,
+        count=count,
+    )
+
+    if not match_ids:
+        raise ValueError(
+            "No recent Ranked Solo matches were found."
+        )
+
+    predictions = []
+    rank_indices = []
+    failed_matches = []
+
+    for match_id in match_ids:
+        try:
+            # Retrieve each match once
+            match = get_match(match_id, platform)
+            info = match["info"]
+
+            if info.get("queueId") != RANKED_SOLO_QUEUE:
+                continue
+
+            participants = info.get("participants", [])
+
+            if len(participants) != 10:
+                continue
+
+            player = find_player(participants, puuid)
+
+            if player is None:
+                continue
+
+            # Prepare all 10 participants for CatBoost
+            converted = [
+                convert_participant(
+                    participant,
+                    info["gameStartTimestamp"],
+                    info["gameDuration"],
+                )
+                for participant in participants
+            ]
+
+            result = predict_rank(
+                raw_participants=converted,
+                selected_player_id=player["summonerId"],
+            )
+
+            predicted_rank = str(
+                result["predicted_rank"]
+            ).upper()
+
+            if predicted_rank not in RANK_ORDER:
+                raise ValueError(
+                    f"Unexpected rank: {predicted_rank}"
+                )
+
+            rank_indices.append(
+                RANK_ORDER.index(predicted_rank)
+            )
+
+            # Information for the frontend match cards
+            predictions.append({
+                "match_id": match_id,
+                "predicted_rank": predicted_rank,
+                "win": player.get("win", False),
+                "role": player.get("teamPosition", ""),
+                "kills": player.get("kills", 0),
+                "deaths": player.get("deaths", 0),
+                "assists": player.get("assists", 0),
+                "cs": (
+                    player.get("totalMinionsKilled", 0)
+                    + player.get("neutralMinionsKilled", 0)
+                ),
+                "gold": player.get("goldEarned", 0),
+                "damage": player.get(
+                    "totalDamageDealtToChampions", 0
+                ),
+                "vision_score": player.get(
+                    "visionScore", 0
+                ),
+                "duration_minutes": round(
+                    info["gameDuration"] / 60, 1
+                ),
+                "game_start_timestamp": info.get(
+                    "gameStartTimestamp"
+                ),
+            })
+
+        except (ValueError, KeyError, TypeError) as error:
+            failed_matches.append({
+                "match_id": match_id,
+                "error": str(error),
+            })
+
+    if not rank_indices:
+        raise ValueError(
+            "No matches could be successfully analysed."
+        )
+
+    # Provisional median calculation.
+    # Confirm rounding against the validation notebook.
+    median_index = round(median(rank_indices))
+    overall_rank = RANK_ORDER[median_index]
+
+    return {
+        "player": {
+            "game_name": account["gameName"],
+            "tag_line": account["tagLine"],
+            "platform": platform.upper(),
+        },
+        "overall_prediction": {
+            "predicted_rank": overall_rank,
+            "matches_analyzed": len(predictions),
+            "method": "median",
+        },
+        "matches": predictions,
+        "failed_matches": failed_matches,
+    }

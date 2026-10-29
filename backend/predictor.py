@@ -1240,3 +1240,4 @@ def predict_rank(raw_participants, selected_player_id):
             f"{RANK_ORDER[int(final_prediction)].title()}."
         )
     }
+
